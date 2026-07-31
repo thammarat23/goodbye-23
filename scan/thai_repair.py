@@ -61,13 +61,27 @@ MAX_LOOKBACK = 2
 #      50     87.2%      5.9%     88.2%
 #     200     87.5%      5.5%     88.8%
 #     500     88.2%      4.6%     90.7%
+#    1000     88.2%      4.4%     91.2%
+#    2000     90.0%      0.4%     99.2%   <- เลือกค่านี้
+#    5000     84.4%      0.4%     99.3%
+#   10000     78.8%      0.2%     99.7%
 #
+# 2000 ชนะทุกด้านพร้อมกัน สูงกว่านั้นอัตรากู้คืนตกเร็วโดยแทบไม่ได้อะไรเพิ่ม
 # ปรับชั่วคราวด้วย THAI_REPAIR_MIN_FREQ เพื่อไล่หาค่าใหม่ได้
-MIN_NEW_WORD_FREQ = int(os.environ.get("THAI_REPAIR_MIN_FREQ", "500"))
+MIN_NEW_WORD_FREQ = int(os.environ.get("THAI_REPAIR_MIN_FREQ", "2000"))
 
-# แก้ ้า เป็น ำ ได้ก็ต่อเมื่อคะแนนความน่าเป็นไปได้เพิ่มขึ้นอย่างน้อยเท่านี้
+# แก้สระอำได้ก็ต่อเมื่อคะแนนความน่าเป็นไปได้เพิ่มขึ้นอย่างน้อยเท่านี้
 # กันไม่ให้ ข้า บ้าน ฟ้า ถ้า เจ้า ที่ใช้กันทั้งเล่มถูกแตะ
-MIN_SARA_AM_GAIN = float(os.environ.get("THAI_REPAIR_SARA_AM_GAIN", "1.0"))
+#
+#    gain   กู้คืนได้   ทำของพัง   ชื่อรอด
+#     1.0     86.8%      1.2%     99.1%
+#     2.0     87.1%      0.6%     99.1%
+#     4.0     86.7%      0.4%     99.1%   <- เลือกค่านี้
+#     6.0     84.4%      0.4%     99.1%
+#
+# เลือก 4.0 เพราะลดการทำของพังลงครึ่งหนึ่งโดยเสียอัตรากู้คืนแค่ 0.4 จุด
+# ตรงกับหลักที่ว่าทำของดีพังร้ายแรงกว่าซ่อมไม่ได้ สูงกว่านี้ไม่ได้อะไรเพิ่ม
+MIN_SARA_AM_GAIN = float(os.environ.get("THAI_REPAIR_SARA_AM_GAIN", "4.0"))
 
 # คำที่ห้ามแตะเด็ดขาดตอนแก้สระอำ
 #
@@ -281,6 +295,11 @@ def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
     words, _ = _load()
     toks = list(_tokens(line))
     out: list[str] = []
+    # โทเคนตัวที่เท่าไรเป็นจุดเริ่มของแต่ละชิ้นใน out
+    #
+    # ต้องจำไว้เพราะหนึ่งชิ้นใน out อาจมาจากหลายโทเคน (ตอนรวมคำ) หรือศูนย์
+    # โทเคน (ตอนทิ้งเศษสระ) จะถอยกลับโดยนับจำนวนโทเคนตรงๆ ไม่ได้
+    out_at: list[int] = []
     fixes: list[tuple[str, str]] = []
     unsure: list[str] = []
 
@@ -289,6 +308,7 @@ def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
         token = toks[i]
         if not is_thai(token) or token in words:
             out.append(token)
+            out_at.append(i)
             i += 1
             continue
 
@@ -344,14 +364,18 @@ def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
 
         if best:
             cand, start, end, _score = best
-            # ถอยกลับไปเอาโทเคนที่เผลอส่งออกไปแล้วคืนมา
-            for _ in range(i - start):
+            # ถอยกลับไปเอาชิ้นที่เผลอส่งออกไปแล้วคืนมา โดยดูจากตำแหน่งโทเคน
+            # ไม่ใช่นับจำนวน เพราะหนึ่งชิ้นอาจมาจากหลายโทเคน
+            while out_at and out_at[-1] >= start:
                 out.pop()
+                out_at.pop()
             out.append(cand)
+            out_at.append(start)
             fixes.append(("".join(toks[start:end]), cand))
             i = end
         else:
             out.append(token)
+            out_at.append(i)
             if MARK_RE.search(token) and len(token) > 2:
                 unsure.append(token)
             i += 1

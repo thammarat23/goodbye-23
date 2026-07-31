@@ -28,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from thai_repair import repair_line  # noqa: E402
+from thai_repair import repair_text  # noqa: E402
 from fix_ocr_text import repair as safe_repair  # noqa: E402
 
 from pythainlp.corpus.common import thai_words  # noqa: E402
@@ -93,8 +93,13 @@ def corrupt(text: str, rng: random.Random) -> str:
 
 
 def run_repair(text: str) -> str:
+    """ต้องเรียกให้ตรงกับที่ใช้งานจริง ไม่งั้นวัดได้ไม่ครบ
+
+    เคยเรียกแค่ repair_line ทำให้ด่านแก้สระอำไม่ถูกวัดเลย ตัวเลขกู้คืนจึงต่ำ
+    กว่าความจริงมาก repair_text คือสิ่งที่ fix_ocr_text.py เรียกใช้
+    """
     pre, _ = safe_repair(text)
-    fixed, _f, _u = repair_line(pre)
+    fixed, _f, _u = repair_text(pre)
     return fixed
 
 
