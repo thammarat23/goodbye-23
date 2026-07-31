@@ -19,6 +19,9 @@ import sys
 import unicodedata
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from thai_repair import repair_text  # noqa: E402
+
 # ── ความเสียหายที่แก้ได้แน่นอน ────────────────────────────────────────────
 
 # นิคหิต + สระอา (U+0E4D U+0E32) ต้องเป็นสระอำ (U+0E33)
@@ -88,15 +91,38 @@ def inspect(text: str) -> dict:
     return found
 
 
-def process(path: Path, report_only: bool) -> dict:
+def process(path: Path, report_only: bool, use_dict: bool = True) -> dict:
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     fixed, stats = repair(text)
+
+    if use_dict:
+        fixed, fixes, unsure = repair_text(fixed)
+        stats["words_repaired"] = len(fixes)
+        stats["words_unsure"] = len(unsure)
+        stats["fix_samples"] = [f"{a} -> {b}" for a, b in fixes[:8]]
+        stats["unsure_samples"] = unsure[:8]
+    else:
+        fixes, unsure = [], []
+        stats["words_repaired"] = 0
+        stats["words_unsure"] = 0
+        stats["fix_samples"] = []
+        stats["unsure_samples"] = []
+
     stats.update(inspect(fixed))
     stats["file"] = path.name
     if not report_only:
         target = path.with_suffix(".repaired.txt")
         target.write_text(fixed, encoding="utf-8")
         stats["written"] = target.name
+
+        # บันทึกทุกจุดที่แก้ ไว้ตรวจย้อนหลังและกลับคืนได้ถ้าแก้ผิด
+        # ตัวซ่อมตัดสินจากพจนานุกรม ไม่ได้เข้าใจเนื้อเรื่อง จึงต้องตรวจได้เสมอ
+        log = path.with_suffix(".changes.tsv")
+        lines = ["ชนิด\tก่อน\tหลัง"]
+        lines += [f"แก้\t{a}\t{b}" for a, b in fixes]
+        lines += [f"ไม่แก้ รอคนตัดสิน\t{w}\t" for w in unsure]
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        stats["change_log"] = log.name
     return stats
 
 
@@ -105,6 +131,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--report", action="store_true", help="ตรวจอย่างเดียว ไม่เขียนไฟล์")
     parser.add_argument("--json", action="store_true", help="ผลลัพธ์เป็น JSON")
+    parser.add_argument("--no-dict", action="store_true",
+                        help="ข้ามการซ่อมด้วยพจนานุกรม ทำเฉพาะที่แก้ได้แน่นอน")
     args = parser.parse_args(argv)
 
     targets: list[Path] = []
@@ -120,7 +148,7 @@ def main(argv: list[str]) -> int:
         print("ไม่มีไฟล์ให้ทำงาน", file=sys.stderr)
         return 1
 
-    results = [process(p, args.report) for p in targets]
+    results = [process(p, args.report, not args.no_dict) for p in targets]
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -128,13 +156,17 @@ def main(argv: list[str]) -> int:
 
     for r in results:
         print(f"\n── {r['file']}")
-        print(f"   แก้สระอำที่โค้ดผิด : {r['sara_am_fixed']:,} จุด")
-        print(f"   ซ่อมตัวคั่นหน้า     : {r['markers_fixed']:,} จุด")
-        print(f"   [ต้องคนตัดสิน] 'นั้น' ที่อาจมาจาก 'นน' : {r['นั้น_อาจมาจาก_นน']:,}")
-        print(f"   [ต้องคนตัดสิน] 'ยัง' ที่อาจมาจาก 'ยง'   : {r['ยัง_อาจมาจาก_ยง']:,}")
-        print(f"   [ต้องคนตัดสิน] คำติดกันยาวเกิน 40 ตัว   : {r['คำติดกันยาวเกิน40ตัว']:,}")
+        print(f"   แก้สระอำที่เข้ารหัสผิด : {r['sara_am_fixed']:,} จุด")
+        print(f"   ซ่อมตัวคั่นหน้า        : {r['markers_fixed']:,} จุด")
+        print(f"   ซ่อมคำด้วยพจนานุกรม    : {r['words_repaired']:,} คำ")
+        for sample in r["fix_samples"]:
+            print(f"      {sample}")
+        print(f"   ไม่กล้าแก้ ต้องคนดู     : {r['words_unsure']:,} คำ")
+        if r["unsure_samples"]:
+            print(f"      {', '.join(r['unsure_samples'])}")
+        print(f"   คำติดกันยาวเกิน 40 ตัว : {r['คำติดกันยาวเกิน40ตัว']:,}")
         if r["ตัวอย่างคำติดกัน"]:
-            print(f"      ตัวอย่าง: {r['ตัวอย่างคำติดกัน']}")
+            print(f"      {r['ตัวอย่างคำติดกัน']}")
     return 0
 
 
