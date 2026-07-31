@@ -47,6 +47,13 @@ MAX_REMOVALS = 2
 # แต่ความหมายคนละเรื่อง กลายเป็นทำของเสียให้เสียหนักกว่าเดิม
 MIN_CHUNK_CHARS = 5
 
+# ถอยกลับไปรวมคำทางซ้ายได้มากสุดกี่คำ
+MAX_LOOKBACK = 2
+
+
+# ลบเครื่องหมายเลยขอบคำที่เสียออกไปได้กี่ตัวอักษร (เผื่อรอยขาดคาบเกี่ยว)
+JUNCTION_REACH = 3
+
 # เศษสระ/วรรณยุกต์ที่ลอยอยู่โดยไม่มีพยัญชนะเกาะ เป็นขยะแน่นอน ลบได้เลย
 ORPHAN_MARKS = re.compile(f"^[{MARKS}ะ-ฺ็-๎]+$")
 
@@ -98,9 +105,17 @@ def plausibility(text: str) -> float:
     return sum(math.log(freq.get(t, 0) + 1) for t in _tokens(text) if is_thai(t))
 
 
-def _variants(chunk: str):
-    """ผลิตตัวเลือกการซ่อม: ลบเครื่องหมายที่แทรกเกิน และแก้ ้า ที่ควรเป็น ำ"""
-    positions = [m.start() for m in MARK_RE.finditer(chunk)]
+def _variants(chunk: str, allowed: range | None = None):
+    """ผลิตตัวเลือกการซ่อม: ลบเครื่องหมายที่แทรกเกิน และแก้ ้า ที่ควรเป็น ำ
+
+    allowed จำกัดว่าลบเครื่องหมายได้ในช่วงตัวอักษรไหนของ chunk
+    ใช้กันไม่ให้ไปดึงวรรณยุกต์ออกจากคำข้างเคียงที่ถูกต้องอยู่แล้ว
+    (เคสจริง: ซ่อม "เสียัง" แล้วเผลอทำ "ขับกล่อม" กลายเป็น "ขับกลอม")
+    """
+    positions = [
+        m.start() for m in MARK_RE.finditer(chunk)
+        if allowed is None or m.start() in allowed
+    ]
     for n in range(1, MAX_REMOVALS + 1):
         for combo in combinations(positions, n):
             drop = set(combo)
@@ -137,26 +152,53 @@ def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
             i += 1
             continue
 
-        # จุดเสียมักคาบเกี่ยวคำที่พจนานุกรมรู้จัก ("ถ" + "นั้น" ที่จริงคือ "ถนน")
-        # จึงต้องขยายหน้าต่างออกไปทีละคำจนกว่าจะพิสูจน์ได้
-        best: tuple[str, int, float] | None = None
-        for end in range(i + 1, len(toks) + 1):
-            window = "".join(toks[i:end])
-            if len(window) > MAX_WINDOW_CHARS:
+        # เคยลองกันคำทับศัพท์ด้วยกฎ "คำสั้นที่มีเครื่องหมายของตัวเองห้ามซ่อม"
+        # เพื่อรักษา "หวัน" (จาก ไต้หวัน) ผลคือเสียมากกว่าได้ ปิดการซ่อม
+        # "เสียัง" -> "เสียง" ไปด้วยทั้งที่ควรซ่อม แถมยังกัน "หวัน" ไม่ได้จริง
+        # เพราะมันถูกซ่อมผ่านการถอยกลับจากคำถัดไป จึงเอากฎนั้นออก
+
+        # จุดเสียคาบเกี่ยวคำที่พจนานุกรมรู้จักได้ทั้งสองข้าง
+        #   ขวา: "ถ" + "นั้น"      ที่จริงคือ "ถนน"
+        #   ซ้าย: "ทำงา" + "นั้"   ที่จริงคือ "ทำงานน"
+        # จึงต้องลองขยายหน้าต่างทั้งไปข้างหน้าและถอยกลับ
+        best: tuple[str, int, int, float] | None = None
+        for back in range(0, MAX_LOOKBACK + 1):
+            start = i - back
+            if start < 0 or any(ORPHAN_MARKS.match(t) for t in toks[start:i]):
                 break
-            if len(window) >= MIN_CHUNK_CHARS:
-                for cand in _variants(window):
+            # จำกัดว่าลบเครื่องหมายได้ตรงไหน: ในคำที่เสีย บวกกับบริเวณรอยต่อ
+            # ข้างละไม่กี่ตัวอักษร เพราะรอยขาดมักคาบเกี่ยวคำข้างเคียง
+            # ("นั้น" + "ั่งทน" ที่จริงคือ "นนั่งทน" ต้องลบในคำ "นั้น" ที่ถูกต้อง)
+            #
+            # แต่ต้องไม่ปล่อยให้เอื้อมไปถึงกลางคำข้างเคียง ไม่งั้นจะเกิดเคสจริง
+            # ที่ซ่อม "เสียัง" แล้วเผลอทำ "ขับกล่อม" กลายเป็น "ขับกลอม"
+            offset = len("".join(toks[start:i]))
+            allowed = range(
+                max(0, offset - JUNCTION_REACH),
+                offset + len(token) + JUNCTION_REACH,
+            )
+
+            for end in range(i + 1, len(toks) + 1):
+                window = "".join(toks[start:end])
+                if len(window) > MAX_WINDOW_CHARS:
+                    break
+                if len(window) < MIN_CHUNK_CHARS:
+                    continue
+                for cand in _variants(window, allowed):
                     if cand != window and all_known(cand):
                         scored = plausibility(cand)
-                        if best is None or scored > best[2]:
-                            best = (cand, end, scored)
+                        if best is None or scored > best[3]:
+                            best = (cand, start, end, scored)
             if best:
                 break
 
         if best:
-            cand, end, _score = best
+            cand, start, end, _score = best
+            # ถอยกลับไปเอาโทเคนที่เผลอส่งออกไปแล้วคืนมา
+            for _ in range(i - start):
+                out.pop()
             out.append(cand)
-            fixes.append(("".join(toks[i:end]), cand))
+            fixes.append(("".join(toks[start:end]), cand))
             i = end
         else:
             out.append(token)
