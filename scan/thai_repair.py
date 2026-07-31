@@ -65,6 +65,21 @@ MAX_LOOKBACK = 2
 # ปรับชั่วคราวด้วย THAI_REPAIR_MIN_FREQ เพื่อไล่หาค่าใหม่ได้
 MIN_NEW_WORD_FREQ = int(os.environ.get("THAI_REPAIR_MIN_FREQ", "500"))
 
+# แก้ ้า เป็น ำ ได้ก็ต่อเมื่อคะแนนความน่าเป็นไปได้เพิ่มขึ้นอย่างน้อยเท่านี้
+# กันไม่ให้ ข้า บ้าน ฟ้า ถ้า เจ้า ที่ใช้กันทั้งเล่มถูกแตะ
+MIN_SARA_AM_GAIN = float(os.environ.get("THAI_REPAIR_SARA_AM_GAIN", "1.0"))
+
+# คำที่ห้ามแตะเด็ดขาดตอนแก้สระอำ
+#
+# คลังความถี่ที่ใช้เป็นภาษาไทยสมัยใหม่ ซึ่งคำพวกนี้พบไม่บ่อย แต่ในนิยาย
+# กำลังภายในเป็นคำที่ใช้ทั้งเล่ม โดยเฉพาะ "ข้า" ที่เป็นสรรพนามหลัก
+# ถ้าเชื่อความถี่อย่างเดียว "ข้า" จะกลายเป็น "ขำ" กระจายไปทั้งเรื่อง
+SARA_AM_PROTECTED = {
+    "ข้า", "ข้าง", "ข้าว", "เจ้า", "ท่าน", "ป้า", "น้า", "บ้าน", "บ้า",
+    "ช้าง", "ช้า", "ถ้า", "ม้า", "ค้า", "ฟ้า", "ห้า", "ล้าน", "กล้า",
+    "หน้า", "ข้าม", "อ้าง", "ต้าน", "ผ้า", "ร้าน", "ส้ม", "ว่าน",
+}
+
 
 # ลบเครื่องหมายเลยขอบคำที่เสียออกไปได้กี่ตัวอักษร (เผื่อรอยขาดคาบเกี่ยว)
 JUNCTION_REACH = 3
@@ -111,13 +126,32 @@ def all_known(text: str) -> bool:
 
 
 def plausibility(text: str) -> float:
-    """คะแนนความน่าเป็นข้อความจริง = ผลรวม log ความถี่ของคำที่ประกอบขึ้น
+    """คะแนนความน่าเป็นข้อความจริง = ผลรวม log ความน่าจะเป็นของคำที่ประกอบขึ้น
 
     ใช้แยกกรณีที่ผลลัพธ์เป็นคำจริงทั้งคู่ เช่น "ถนน" (พบ 8,632 ครั้ง) กับ
     "ถนัน" (พบ 1 ครั้ง) ซึ่งถ้าดูแค่ "เป็นคำไหม" จะตัดสินไม่ได้
+
+    ต้องหารด้วยยอดรวมให้เป็นความน่าจะเป็นก่อน ไม่ใช่ใช้ log ความถี่ดิบ
+    ไม่งั้นคะแนนจะเอนเข้าข้างการแตกเป็นหลายคำเสมอ เพราะยิ่งมีคำมากยิ่งบวก
+    ค่าบวกเข้าไปเยอะ ทำให้ "น้า"+"เสียง" ชนะ "น้ำเสียง" ทั้งที่ควรเป็นตรงข้าม
     """
     _, freq = _load()
-    return sum(math.log(freq.get(t, 0) + 1) for t in _tokens(text) if is_thai(t))
+    total = _corpus_total()
+    return sum(
+        math.log((freq.get(t, 0) + 1) / total)
+        for t in _tokens(text) if is_thai(t)
+    )
+
+
+_TOTAL: float | None = None
+
+
+def _corpus_total() -> float:
+    global _TOTAL
+    if _TOTAL is None:
+        _, freq = _load()
+        _TOTAL = float(sum(freq.values())) or 1.0
+    return _TOTAL
 
 
 def new_words_common_enough(cand: str, original: set[str]) -> bool:
@@ -156,6 +190,87 @@ def _variants(chunk: str, allowed: range | None = None):
         yield chunk.replace("้า", "ำ")
     if "ํา" in chunk:
         yield chunk.replace("ํา", "ำ")
+
+
+def _sara_am_variants(window: str):
+    """OCR อ่านสระอำพลาดได้สองแบบ ต้องลองทั้งคู่
+
+        ประจำ   -> ประจ้า    สระอำกลายเป็นไม้โท+สระอา
+        น้ำเสียง -> น้าเสียง   สระอำกลายเป็นสระอาเฉยๆ วรรณยุกต์ยังอยู่
+    """
+    if "้า" in window:
+        yield window.replace("้า", "ำ", 1)
+    for m in re.finditer("า", window):
+        yield window[:m.start()] + "ำ" + window[m.start() + 1:]
+
+
+def repair_sara_am(line: str) -> tuple[str, list[tuple[str, str]]]:
+    """แก้สระอำที่ OCR อ่านเป็นไม้โท+สระอา  ประจ้า -> ประจำ
+
+    ต่างจากการซ่อมแบบอื่นตรงที่รูปที่เพี้ยนมักตัดคำออกมาเป็นคำจริงทั้งคู่
+    "ประจ้า" ตัดได้ "ประ" + "จ้า" ซึ่งมีในพจนานุกรมทั้งสองตัว ตัวซ่อมหลัก
+    จึงมองไม่เห็นว่าเสีย ต้องมีด่านแยกที่ไล่ดูทุกตำแหน่งที่มี ้า
+
+    จะตั้งกฎแทนที่ ้า เป็น ำ ทั้งไฟล์ไม่ได้เด็ดขาด เพราะคำอย่าง ข้า บ้าน
+    ช้าง ฟ้า ถ้า ม้า เจ้า ใช้กันทั้งเล่ม โดยเฉพาะ "ข้า" ในนิยายกำลังภายใน
+    ที่จะกลายเป็น "ขำ" ทันที
+
+    ด่านนี้จึงยอมแทนที่เฉพาะเมื่อรวมคำแล้วได้คำที่ "น่าเป็นไปได้มากกว่าเดิม"
+    วัดด้วยความถี่การใช้จริง ถ้าคำเดิมพบบ่อยกว่าคำใหม่ จะไม่แตะ
+    """
+    words, freq = _load()
+    if "า" not in line:
+        return line, []
+
+    toks = list(_tokens(line))
+    out: list[str] = []
+    fixes: list[tuple[str, str]] = []
+    i = 0
+    while i < len(toks):
+        best: tuple[str, int, float] | None = None
+        # ไล่จากช่วงยาวไปสั้น เพราะการรวมได้คำยาวเป็นหลักฐานที่หนักแน่นกว่า
+        # "น้า"+"เสียง" ควรได้ "น้ำเสียง" ไม่ใช่ "นำ"+"เสียง"
+        for span in (3, 2, 1):
+            if i + span > len(toks):
+                continue
+            window = "".join(toks[i:i + span])
+            if "า" not in window or len(window) > MAX_WINDOW_CHARS:
+                continue
+            # คำสงวนห้ามแตะเมื่อยืนอยู่ลำพัง แต่ถ้ารวมกับคำข้างเคียงแล้วได้
+            # คำยาวคำเดียวที่พจนานุกรมรับรอง ถือว่าหลักฐานหนักแน่นพอ
+            # ("น้า"+"เสียง" ที่จริงคือ "น้ำเสียง" ส่วน "ของ"+"ข้า" รวมแล้ว
+            #  ไม่เป็นคำเดียว จึงถูกปัดตกด้วยกฎคำเดียวอยู่แล้ว)
+            if span == 1 and toks[i] in SARA_AM_PROTECTED:
+                continue
+            for cand in _sara_am_variants(window):
+                # ผลลัพธ์ต้องรวมเป็น "คำเดียว" ที่พจนานุกรมรู้จัก
+                #
+                # ด่านนี้สำคัญที่สุด ถ้าไม่มี "ของ"+"ข้า" จะถูกซ่อมเป็น "ของขำ"
+                # เพราะคลังความถี่เป็นภาษาไทยสมัยใหม่ที่ "ขำ" พบบ่อยกว่า "ข้า"
+                # ทั้งที่ในนิยายกำลังภายใน "ข้า" คือสรรพนามที่ใช้ทั้งเล่ม
+                # การบังคับให้รวมเป็นคำเดียวตัดเคสแบบนี้ทิ้งหมด เพราะ "ของขำ"
+                # ไม่ใช่คำ แต่ "ประจำ" กับ "น้ำเสียง" เป็นคำจริงคำเดียว
+                parts = [t for t in _tokens(cand) if is_thai(t)]
+                if len(parts) != 1 or parts[0] not in words:
+                    continue
+                if freq.get(parts[0], 0) < MIN_NEW_WORD_FREQ:
+                    continue
+                gain = plausibility(cand) - plausibility(window)
+                if gain < MIN_SARA_AM_GAIN:
+                    continue
+                if best is None or gain > best[2]:
+                    best = (cand, i + span, gain)
+            if best:
+                break
+        if best:
+            cand, nxt, _gain = best
+            fixes.append(("".join(toks[i:nxt]), cand))
+            out.append(cand)
+            i = nxt
+        else:
+            out.append(toks[i])
+            i += 1
+    return "".join(out), fixes
 
 
 def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
@@ -247,7 +362,9 @@ def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
 def repair_text(text: str) -> tuple[str, list[tuple[str, str]], list[str]]:
     lines, fixes, unsure = [], [], []
     for line in text.split("\n"):
+        line, saf = repair_sara_am(line)
         fixed, f, u = repair_line(line)
+        f = saf + f
         lines.append(fixed)
         fixes.extend(f)
         unsure.extend(u)

@@ -79,6 +79,7 @@ def corrupt(text: str, rng: random.Random) -> str:
       นน -> นั้น    เป็นนักเขียน -> เป็นั้นักเขียน
       ยง -> ยัง     เสียง -> เสียัง
       ำ  -> ํา      จำหน่าย -> จําหน่าย (นิคหิต+สระอา)
+      ำ  -> ้า      ประจำ -> ประจ้า, น้ำเสียง -> น้าเสียง
     """
     if "นน" in text and rng.random() < 0.8:
         text = text.replace("นน", "นั้น", 1)
@@ -86,6 +87,8 @@ def corrupt(text: str, rng: random.Random) -> str:
         text = text.replace("ยง", "ยัง", 1)
     if "ำ" in text and rng.random() < 0.5:
         text = text.replace("ำ", "ํา", 1)
+    elif "ำ" in text and rng.random() < 0.5:
+        text = text.replace("ำ", "้า", 1)
     return text
 
 
