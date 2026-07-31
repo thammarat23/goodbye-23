@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 from fix_ocr_text import repair as safe_repair  # noqa: E402
-from thai_repair import repair_line  # noqa: E402
+from thai_repair import repair_text  # noqa: E402
 
 
 def load(path: Path) -> list[tuple[str, str]]:
@@ -37,7 +37,7 @@ def main() -> int:
 
     for bad, good in cases:
         pre, _ = safe_repair(bad)
-        got, _fixes, _unsure = repair_line(pre)
+        got, _fixes, _unsure = repair_text(pre)
         already_correct = bad == good
 
         if already_correct:
