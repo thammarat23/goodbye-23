@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from functools import lru_cache
 from itertools import combinations
@@ -49,6 +50,20 @@ MIN_CHUNK_CHARS = 5
 
 # ถอยกลับไปรวมคำทางซ้ายได้มากสุดกี่คำ
 MAX_LOOKBACK = 2
+
+# คำใหม่ที่เกิดจากการซ่อมต้องพบในคลังความถี่ TNC อย่างน้อยกี่ครั้ง
+#
+# เป็นด่านกันการซ่อมมั่ว วัดด้วย scan/tests/benchmark.py ที่ 20,000 บรรทัด
+# ยิ่งเกณฑ์สูง ยิ่งดีขึ้นทั้งสามค่าพร้อมกัน ไม่ได้แลกกันอย่างที่คิดตอนแรก
+#
+#   เกณฑ์   กู้คืนได้   ทำของพัง   ชื่อรอด
+#       0     83.8%      9.6%     80.7%
+#      50     87.2%      5.9%     88.2%
+#     200     87.5%      5.5%     88.8%
+#     500     88.2%      4.6%     90.7%
+#
+# ปรับชั่วคราวด้วย THAI_REPAIR_MIN_FREQ เพื่อไล่หาค่าใหม่ได้
+MIN_NEW_WORD_FREQ = int(os.environ.get("THAI_REPAIR_MIN_FREQ", "500"))
 
 
 # ลบเครื่องหมายเลยขอบคำที่เสียออกไปได้กี่ตัวอักษร (เผื่อรอยขาดคาบเกี่ยว)
@@ -103,6 +118,22 @@ def plausibility(text: str) -> float:
     """
     _, freq = _load()
     return sum(math.log(freq.get(t, 0) + 1) for t in _tokens(text) if is_thai(t))
+
+
+def new_words_common_enough(cand: str, original: set[str]) -> bool:
+    """คำใหม่ที่เกิดจากการซ่อม ต้องเป็นคำที่พบบ่อยพอสมควร
+
+    เป็นด่านกันชื่อทับศัพท์ถูกทำลาย ชื่ออย่าง "เล่งสุ้น" พอลบวรรณยุกต์ออก
+    อาจกลายเป็นคำที่มีในพจนานุกรมได้เหมือนกัน แต่เป็นคำหายากที่แทบไม่มีใครใช้
+    ถ้าบังคับว่าคำใหม่ต้องพบบ่อยถึงระดับหนึ่ง การซ่อมมั่วจะถูกปัดตกไปเอง
+    """
+    _, freq = _load()
+    for tok in _tokens(cand):
+        if not is_thai(tok) or tok in original:
+            continue
+        if freq.get(tok, 0) < MIN_NEW_WORD_FREQ:
+            return False
+    return True
 
 
 def _variants(chunk: str, allowed: range | None = None):
@@ -184,11 +215,15 @@ def repair_line(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
                     break
                 if len(window) < MIN_CHUNK_CHARS:
                     continue
+                original = set(_tokens(window))
                 for cand in _variants(window, allowed):
-                    if cand != window and all_known(cand):
-                        scored = plausibility(cand)
-                        if best is None or scored > best[3]:
-                            best = (cand, start, end, scored)
+                    if cand == window or not all_known(cand):
+                        continue
+                    if not new_words_common_enough(cand, original):
+                        continue
+                    scored = plausibility(cand)
+                    if best is None or scored > best[3]:
+                        best = (cand, start, end, scored)
             if best:
                 break
 
