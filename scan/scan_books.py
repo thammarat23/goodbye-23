@@ -59,8 +59,10 @@ DIRECT_TEXT_MIN_CHARS = 200
 
 
 def ensure_dirs() -> None:
+    global SCRATCH
     for folder in ALL_DIRS:
         folder.mkdir(parents=True, exist_ok=True)
+    SCRATCH = scratch_dir()
 
 
 def log(message: str) -> None:
@@ -96,17 +98,39 @@ def preprocess(image: Image.Image) -> Image.Image:
     return ImageOps.autocontrast(gray).filter(ImageFilter.SHARPEN)
 
 
-def run_tesseract(image: Image.Image, psm: str = "6") -> str:
+def scratch_dir() -> Path:
+    """ที่พักไฟล์ชั่วคราวตอน OCR — ใช้ /dev/shm (แรม) ถ้ามี จะได้ไม่ต้องเขียนดิสก์
+
+    แต่ละหน้าเขียน PNG ชั่วคราวหนึ่งไฟล์แล้วลบทิ้ง เล่มหนาเป็นพันหน้าจึงเขียน
+    ดิสก์ซ้ำๆ โดยไม่จำเป็น เครื่องที่สองมีแรมว่าง 14 GB ใช้แรมทำแทนคุ้มกว่า
+    """
+    shm = Path("/dev/shm")
+    if shm.is_dir() and os.access(shm, os.W_OK):
+        target = shm / "book_scan"
+        target.mkdir(parents=True, exist_ok=True)
+        return target
     STATE.mkdir(parents=True, exist_ok=True)
+    return STATE
+
+
+SCRATCH = None  # ตั้งค่าจริงตอน ensure_dirs()
+
+
+def run_tesseract(image: Image.Image, psm: str = "6") -> str:
+    scratch = SCRATCH or scratch_dir()
     stamp = time.time_ns()
-    tmp_in = STATE / f"tmp_{stamp}.png"
-    tmp_out = STATE / f"ocr_{stamp}"
+    tmp_in = scratch / f"tmp_{stamp}.png"
+    tmp_out = scratch / f"ocr_{stamp}"
     image.save(tmp_in)
     try:
+        # Tesseract มัลติเธรดในตัวผ่าน OpenMP อยู่แล้ว (หนึ่งหน้ากิน CPU ~3.9 วิ
+        # แต่จบใน 1.4 วิ) ถ้าปล่อยไว้แล้วรันขนาน 4 ตัวบน 4 คอร์ จะได้ 16 เธรด
+        # แย่งกันจนช้าลงหลายสิบเท่า จำกัดเป็น 1 เธรดต่อตัวแล้วขนานเองแทน
+        env = {**os.environ, "OMP_THREAD_LIMIT": "1"}
         subprocess.run(
             [TESSERACT, str(tmp_in), str(tmp_out), "-l", OCR_LANG,
              "--psm", psm, "--oem", "1", "quiet"],
-            check=True, capture_output=True, text=True,
+            check=True, capture_output=True, text=True, env=env,
         )
         return tmp_out.with_suffix(".txt").read_text(encoding="utf-8", errors="ignore")
     finally:
@@ -129,20 +153,24 @@ def ocr_pdf(path: Path) -> tuple[str, dict]:
     need_ocr = [i for i, t in enumerate(direct_pages) if len(t) < DIRECT_TEXT_MIN_CHARS]
     log(f"  {total} หน้า | มี text layer {total - len(need_ocr)} หน้า | ต้อง OCR {len(need_ocr)} หน้า")
 
-    images = {i: preprocess(render_page(doc[i], PDF_DPI)) for i in need_ocr}
-    doc.close()
-
+    # เรนเดอร์ทีละชุด ไม่เก็บทุกหน้าไว้ในแรมพร้อมกัน
+    # หน้า A4 ที่ 300 DPI กินราว 25 MB ถ้าเล่มหนา 400 หน้าแล้วเรนเดอร์รวดเดียว
+    # จะกินเกิน 10 GB จนเครื่องล่ม ชุดละ MAX_WORKERS*2 กินไม่เกินราว 200 MB
     ocr_pages: dict[int, str] = {}
-    if images:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(run_tesseract, img): i for i, img in images.items()}
-            completed = 0
+    batch_size = MAX_WORKERS * 2
+    completed = 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        for start in range(0, len(need_ocr), batch_size):
+            batch = need_ocr[start:start + batch_size]
+            futures = {
+                pool.submit(run_tesseract, preprocess(render_page(doc[i], PDF_DPI))): i
+                for i in batch
+            }
             for future in as_completed(futures):
-                index = futures[future]
-                ocr_pages[index] = future.result().strip()
+                ocr_pages[futures[future]] = future.result().strip()
                 completed += 1
-                if completed % 10 == 0 or completed == len(futures):
-                    log(f"  OCR {completed}/{len(futures)} หน้า")
+            log(f"  OCR {completed}/{len(need_ocr)} หน้า")
+    doc.close()
 
     parts: list[str] = []
     ocr_chars = 0
