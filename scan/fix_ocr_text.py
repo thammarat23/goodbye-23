@@ -91,7 +91,8 @@ def inspect(text: str) -> dict:
     return found
 
 
-def process(path: Path, report_only: bool, use_dict: bool = True) -> dict:
+def process(path: Path, report_only: bool, use_dict: bool = True,
+            space: bool = False) -> dict:
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     fixed, stats = repair(text)
 
@@ -107,6 +108,13 @@ def process(path: Path, report_only: bool, use_dict: bool = True) -> dict:
         stats["words_unsure"] = 0
         stats["fix_samples"] = []
         stats["unsure_samples"] = []
+
+    if space:
+        from thai_space import add_spaces
+        fixed, added = add_spaces(fixed)
+        stats["spaces_added"] = added
+    else:
+        stats["spaces_added"] = 0
 
     stats.update(inspect(fixed))
     stats["file"] = path.name
@@ -133,6 +141,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="ผลลัพธ์เป็น JSON")
     parser.add_argument("--no-dict", action="store_true",
                         help="ข้ามการซ่อมด้วยพจนานุกรม ทำเฉพาะที่แก้ได้แน่นอน")
+    parser.add_argument("--space", action="store_true",
+                        help="แทรกช่องว่างคืนในช่วงที่คำติดกันเป็นพืด (ปิดไว้เป็นค่าเริ่มต้น)")
     args = parser.parse_args(argv)
 
     targets: list[Path] = []
@@ -148,7 +158,7 @@ def main(argv: list[str]) -> int:
         print("ไม่มีไฟล์ให้ทำงาน", file=sys.stderr)
         return 1
 
-    results = [process(p, args.report, not args.no_dict) for p in targets]
+    results = [process(p, args.report, not args.no_dict, args.space) for p in targets]
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -164,6 +174,8 @@ def main(argv: list[str]) -> int:
         print(f"   ไม่กล้าแก้ ต้องคนดู     : {r['words_unsure']:,} คำ")
         if r["unsure_samples"]:
             print(f"      {', '.join(r['unsure_samples'])}")
+        if r.get("spaces_added"):
+            print(f"   แทรกช่องว่างคืน        : {r['spaces_added']:,} จุด")
         print(f"   คำติดกันยาวเกิน 40 ตัว : {r['คำติดกันยาวเกิน40ตัว']:,}")
         if r["ตัวอย่างคำติดกัน"]:
             print(f"      {r['ตัวอย่างคำติดกัน']}")

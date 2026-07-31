@@ -72,6 +72,42 @@ def build_sentences(n: int, rng: random.Random) -> list[tuple[str, set[str]]]:
 
 # ── ทำให้เสียตามรูปแบบที่พบในไฟล์จริง ──────────────────────────────────────
 
+def build_sentences_with_spans(n: int, seed: int):
+    """เหมือน build_sentences แต่คืนเฉลยตำแหน่งรอยต่อคำและช่วงของชื่อมาด้วย
+
+    ใช้วัดการแทรกช่องว่างคืน ซึ่งต้องรู้ว่ารอยต่อที่ถูกต้องอยู่ตรงไหนบ้าง
+    เราต่อคำเข้าด้วยกันเอง จึงรู้ตำแหน่งทุกจุดโดยไม่ต้องเดา
+    """
+    rng = random.Random(seed)
+    freq = dict(tnc.word_freqs())
+    words = sorted(w for w in thai_words() if re.fullmatch("[฀-๿]+", w) and len(w) > 1)
+    weights = [freq.get(w, 1) for w in words]
+
+    cast = [make_name(rng) for _ in range(12)]
+
+    out = []
+    for _ in range(n):
+        # ให้ยาวพอที่ตัวแทรกช่องว่างจะมองว่าเป็นช่วงที่ติดกันผิดปกติ
+        picked = rng.choices(words, weights=weights, k=rng.randint(14, 24))
+        if rng.random() < 0.5:
+            # ใช้ตัวละครชุดเดิมซ้ำทั้งเล่ม เหมือนนิยายจริงที่มีตัวละครหลัก
+            # ไม่กี่คนแล้วชื่อโผล่ซ้ำเป็นร้อยครั้ง ซึ่งเป็นข้อมูลที่ตัวแทรก
+            # ช่องว่างใช้แยกชื่อออกจากคำธรรมดาได้
+            picked.insert(rng.randrange(len(picked)), rng.choice(cast))
+
+        boundaries: set[int] = set()
+        name_spans: list[tuple[int, int]] = []
+        pos = 0
+        for word in picked:
+            if pos:
+                boundaries.add(pos)
+            if word not in words:  # คำที่ไม่ได้มาจากพจนานุกรม = ชื่อที่แทรกเข้าไป
+                name_spans.append((pos, pos + len(word)))
+            pos += len(word)
+        out.append(("".join(picked), boundaries, name_spans))
+    return out
+
+
 def corrupt(text: str, rng: random.Random) -> str:
     """จำลองความเสียหายที่ OCR ทำจริงกับไฟล์ในโฟลเดอร์ "หนังสือรอแก้"
 

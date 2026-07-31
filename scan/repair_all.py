@@ -24,18 +24,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
-def _one(args: tuple[str, bool]) -> dict:
-    path_str, report_only = args
+def _one(args: tuple[str, bool, bool]) -> dict:
+    path_str, report_only, space = args
     from fix_ocr_text import process  # นำเข้าในลูกเพื่อไม่ต้องขนพจนานุกรมข้ามโพรเซส
     try:
-        return process(Path(path_str), report_only)
+        return process(Path(path_str), report_only, True, space)
     except Exception as exc:
         return {"file": Path(path_str).name, "error": str(exc)}
 
 
 COLUMNS = [
     "file", "sara_am_fixed", "markers_fixed", "words_repaired",
-    "words_unsure", "คำติดกันยาวเกิน40ตัว", "lines_in", "lines_out", "error",
+    "words_unsure", "spaces_added", "คำติดกันยาวเกิน40ตัว",
+    "lines_in", "lines_out", "error",
 ]
 
 
@@ -44,6 +45,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("folder", type=Path)
     parser.add_argument("--report", action="store_true", help="ไม่เขียนไฟล์ ดูอย่างเดียว")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2)))
+    parser.add_argument("--space", action="store_true",
+                        help="แทรกช่องว่างคืนในช่วงที่คำติดกันเป็นพืด (ปิดไว้เป็นค่าเริ่มต้น)")
     parser.add_argument("--out", type=Path, help="ที่เก็บตารางสรุป (ค่าเริ่มต้น: สรุปการซ่อม.csv ในโฟลเดอร์)")
     args = parser.parse_args(argv)
 
@@ -65,7 +68,7 @@ def main(argv: list[str]) -> int:
 
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         futures = {
-            pool.submit(_one, (str(p), args.report)): p.name for p in targets
+            pool.submit(_one, (str(p), args.report, args.space)): p.name for p in targets
         }
         for done, future in enumerate(as_completed(futures), 1):
             results.append(future.result())
