@@ -32,24 +32,42 @@ MOSTLY_TEXT = 0.90
 MOSTLY_SCAN = 0.10
 
 
-def survey(pdf: Path) -> dict:
+def pick_sample_pages(total: int, count: int) -> list[int]:
+    """เลือกหน้าตัวอย่างให้กระจายทั้งเล่ม ไม่ใช่กระจุกอยู่ต้นเล่ม
+
+    หน้าแรกๆ มักเป็นปกหรือสารบัญซึ่งไม่ได้บอกอะไรเกี่ยวกับเนื้อเรื่อง
+    ต้องสุ่มดูตรงกลางเล่มด้วยจึงจะรู้ว่าเนื้อในเป็นข้อความหรือภาพ
+    """
+    if total <= count:
+        return list(range(total))
+    step = total / count
+    return sorted({min(total - 1, int(i * step)) for i in range(count)})
+
+
+def survey(pdf: Path, sample_pages: int = 0) -> dict:
     try:
         doc = fitz.open(str(pdf))
     except Exception as exc:
         return {"file": pdf.name, "error": str(exc)[:120]}
 
     pages = len(doc)
+    indexes = pick_sample_pages(pages, sample_pages) if sample_pages else range(pages)
+    checked = 0
     with_text = 0
     sample = ""
-    for page in doc:
-        text = (page.get_text() or "").strip()
+    for index in indexes:
+        checked += 1
+        text = (doc[index].get_text() or "").strip()
         if len(text) >= TEXT_LAYER_MIN_CHARS:
             with_text += 1
             if not sample:
                 sample = " ".join(text.split())[:80]
     doc.close()
 
-    ratio = with_text / pages if pages else 0.0
+    ratio = with_text / checked if checked else 0.0
+    if sample_pages:
+        # ดูแค่ตัวอย่าง จึงประมาณจำนวนหน้าทั้งเล่มจากสัดส่วนที่วัดได้
+        with_text = round(ratio * pages)
     if ratio >= MOSTLY_TEXT:
         verdict = "ใช้ได้เลย ไม่ต้อง OCR"
     elif ratio <= MOSTLY_SCAN:
@@ -73,6 +91,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("folder", type=Path)
     parser.add_argument("--recursive", action="store_true", help="ไล่โฟลเดอร์ย่อยด้วย")
     parser.add_argument("--out", type=Path, help="ที่เก็บตาราง (ค่าเริ่มต้น: สำรวจPDF.csv)")
+    parser.add_argument("--quick", type=int, metavar="N", default=0,
+                        help="ดูแค่ N หน้าต่อเล่มแบบกระจายทั้งเล่ม เร็วกว่ามากเมื่อไฟล์อยู่บนไดรฟ์สตรีม")
     args = parser.parse_args(argv)
 
     if not args.folder.is_dir():
@@ -85,26 +105,51 @@ def main(argv: list[str]) -> int:
         print("ไม่พบไฟล์ PDF", file=sys.stderr)
         return 1
 
-    print(f"สำรวจ {len(pdfs)} เล่ม\n")
-    rows = []
-    for pdf in pdfs:
-        row = survey(pdf)
-        rows.append(row)
-        if "error" in row:
-            print(f"  [เปิดไม่ได้] {row['file']}: {row['error']}")
-        else:
-            print(f"  {row['verdict']:<22} {row['pages']:>4} หน้า  "
-                  f"text {row['text_layer']:>4}  {row['file'][:50]}")
-
     out = args.out or args.folder / "สำรวจPDF.csv"
-    with out.open("w", encoding="utf-8-sig", newline="") as fh:
-        writer = csv.DictWriter(
-            fh,
-            fieldnames=["file", "pages", "text_layer", "need_ocr", "verdict", "mb", "sample", "error"],
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    fields = ["file", "pages", "text_layer", "need_ocr", "verdict", "mb", "sample", "error"]
+
+    # อ่านผลเดิมกลับมา แล้วข้ามเล่มที่สำรวจไปแล้ว
+    #
+    # คลังมีหลายพันเล่มและไฟล์อยู่บนไดรฟ์แบบสตรีม การอ่านแต่ละเล่มต้องโหลด
+    # ไฟล์ลงมาก่อน ถ้าหยุดกลางคันแล้วต้องเริ่มใหม่ทั้งหมดจะเสียเวลามาก
+    rows: list[dict] = []
+    done: set[str] = set()
+    if out.exists():
+        with out.open(encoding="utf-8-sig", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        for row in rows:
+            for key in ("pages", "text_layer", "need_ocr"):
+                if row.get(key):
+                    row[key] = int(row[key])
+            done.add(row["file"])
+        print(f"มีผลเดิมอยู่แล้ว {len(done)} เล่ม จะสำรวจต่อจากตรงนั้น")
+
+    todo = [p for p in pdfs if p.name not in done]
+    print(f"สำรวจ {len(todo)} เล่ม (ทั้งหมด {len(pdfs)})\n")
+
+    # เขียนทีละเล่ม ไม่รอจบ จะได้ไม่เสียของถ้าหยุดกลางทาง
+    def flush() -> None:
+        with out.open("w", encoding="utf-8-sig", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    try:
+        for number, pdf in enumerate(todo, 1):
+            row = survey(pdf, args.quick)
+            rows.append(row)
+            if "error" in row:
+                print(f"  [เปิดไม่ได้] {row['file'][:50]}: {row['error'][:60]}")
+            else:
+                print(f"  {row['verdict']:<22} {row['pages']:>4} หน้า  "
+                      f"text {row['text_layer']:>4}  {row['file'][:50]}")
+            if number % 20 == 0:
+                flush()
+    except KeyboardInterrupt:
+        print("\n\nหยุดกลางคัน ผลที่สำรวจไปแล้วถูกบันทึกไว้")
+        print(f"รันคำสั่งเดิมซ้ำเพื่อทำต่อ  ({len(rows)} เล่ม)")
+    finally:
+        flush()
 
     ok = [r for r in rows if "error" not in r]
     ready = [r for r in ok if r["verdict"].startswith("ใช้ได้")]
