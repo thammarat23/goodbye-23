@@ -1,0 +1,32 @@
+name: Build spike app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Core tests (Thai date parser, ID card, receipt total, search)
+        run: ./gradlew :core:test --console=plain
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --console=plain
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jotdee-spike-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
