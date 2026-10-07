@@ -16,6 +16,18 @@ android {
         versionName = "0.1-spike"
     }
 
+    // A fixed debug key, so each new APK from CI installs over the previous one
+    // without uninstalling it first. It only signs this test app: the real app
+    // gets its own private key that is never committed.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("spike-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildFeatures {
         compose = true
     }
